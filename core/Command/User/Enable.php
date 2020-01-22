@@ -22,12 +22,15 @@
 namespace OC\Core\Command\User;
 
 use OCP\IUserManager;
+use OCP\User\ShouldNotBeEnabledException;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Input\InputArgument;
 
 class Enable extends Command {
+	const EXIT_CODE_USER_NOT_EXISTS = 1;
+	const EXIT_CODE_USER_NOT_ENABLED = 2;
 	/** @var IUserManager */
 	protected $userManager;
 
@@ -51,13 +54,22 @@ class Enable extends Command {
 	}
 
 	protected function execute(InputInterface $input, OutputInterface $output) {
-		$user = $this->userManager->get($input->getArgument('uid'));
+		$uid = $input->getArgument('uid');
+		$user = $this->userManager->get($uid);
 		if ($user === null) {
 			$output->writeln('<error>User does not exist</error>');
-			return;
+			return self::EXIT_CODE_USER_NOT_EXISTS;
 		}
 
-		$user->setEnabled(true);
-		$output->writeln('<info>The specified user is enabled</info>');
+		try {
+			$this->userManager->throwExceptionIfMightGetDisabled($uid);
+			$user->setEnabled(true);
+			$output->writeln('<info>The specified user is enabled</info>');
+			return 0;
+		} catch (ShouldNotBeEnabledException $e) {
+			$errorMessage = $e->getMessage();
+			$output->writeln("<error>$errorMessage</error>");
+			return self::EXIT_CODE_USER_NOT_ENABLED;
+		}
 	}
 }

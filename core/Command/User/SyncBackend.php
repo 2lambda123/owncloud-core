@@ -27,11 +27,18 @@ use OC\User\AccountMapper;
 use OC\User\Sync\AllUsersIterator;
 use OC\User\Sync\SeenUsersIterator;
 use OC\User\SyncService;
+use OC\User\SyncLimiter;
 use OCP\IConfig;
 use OCP\ILogger;
 use OCP\IUser;
 use OCP\IUserManager;
+use OCP\IGroupManager;
 use OCP\UserInterface;
+use OCP\IUserBackend;
+use OCP\Mail\IMailer;
+use OCP\L10N\IFactory;
+use OCP\Template;
+use OCP\AppFramework\Utility\ITimeFactory;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Helper\ProgressBar;
 use Symfony\Component\Console\Question\ChoiceQuestion;
@@ -39,6 +46,7 @@ use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Input\InputArgument;
+use Symfony\Component\Console\Helper\Table;
 
 class SyncBackend extends Command {
 	const VALID_ACTIONS = ['disable', 'remove'];
@@ -49,24 +57,45 @@ class SyncBackend extends Command {
 	private $config;
 	/** @var IUserManager */
 	private $userManager;
+	/** @var IGroupManager */
+	private $groupManager;
+	/** @var IMailer */
+	private $mailer;
+	/** @var IFactory */
+	private $l10nFactory;
 	/** @var ILogger */
 	private $logger;
+	/** @var ITimeFactory */
+	private $timeFactory;
 
 	/**
 	 * @param AccountMapper $accountMapper
 	 * @param IConfig $config
 	 * @param IUserManager $userManager
+	 * @param IGroupManager $groupManager
+	 * @param IMailer $mailer
 	 * @param ILogger $logger
+	 * @param ITimeFactory $timeFactory
 	 */
-	public function __construct(AccountMapper $accountMapper,
-								IConfig $config,
-								IUserManager $userManager,
-								ILogger $logger) {
+	public function __construct(
+		AccountMapper $accountMapper,
+		IConfig $config,
+		IUserManager $userManager,
+		IGroupManager $groupManager,
+		IMailer $mailer,
+		IFactory $l10nFactory,
+		ILogger $logger,
+		ITimeFactory $timeFactory
+	) {
 		parent::__construct();
 		$this->accountMapper = $accountMapper;
 		$this->config = $config;
 		$this->userManager = $userManager;
+		$this->groupManager = $groupManager;
+		$this->mailer = $mailer;
+		$this->l10nFactory = $l10nFactory;
 		$this->logger = $logger;
+		$this->timeFactory = $timeFactory;
 	}
 
 	protected function configure() {
@@ -164,7 +193,7 @@ class SyncBackend extends Command {
 			$missingAccountsAction = $helper->ask($input, $output, $question);
 		}
 
-		$syncService = new SyncService($this->config, $this->logger, $this->accountMapper);
+		$syncService = new SyncService($this->config, $this->logger, $this->accountMapper, new SyncLimiter($this->accountMapper, $this->config));
 
 		$uid = $input->getOption('uid');
 
@@ -173,6 +202,39 @@ class SyncBackend extends Command {
 		} else {
 			$this->syncMultipleUsers($input, $output, $syncService, $backend, $missingAccountsAction);
 		}
+
+		$stats = $this->showSyncStats($output, $this->accountMapper, $backend);
+
+		$syncLimitInfo = $syncService->getUserLimitInfo(\get_class($backend));
+		if ($syncLimitInfo) {
+			$userCount = 0;
+			// we're only interested in enabled and auto_disabled users.
+			// other states won't determine whether we should send a notification or not
+			if (isset($stats[Account::STATE_ENABLED])) {
+				$userCount += $stats[Account::STATE_ENABLED];
+			}
+			if (isset($stats[Account::STATE_AUTODISABLED])) {
+				$userCount += $stats[Account::STATE_AUTODISABLED];
+			}
+
+			// try to get the backend name ($backend might not be a IUserBackend)
+			$backendName = \get_class($backend);
+			if ($backend instanceof IUserBackend) {
+				$backendName = $backend->getBackendName();
+			}
+
+			if ($userCount > $syncLimitInfo['hard']) {
+				$output->writeln("Several users have been automatically disabled because you have over {$syncLimitInfo['hard']} users");
+				$output->writeln("Please consider to buy a enterprise license to have unlimited users in this backend");
+				$this->notifyHardLimit($syncLimitInfo['soft'], $syncLimitInfo['hard'], $backendName);
+			} elseif ($userCount > $syncLimitInfo['soft']) {
+				$output->writeln("You are getting near the {$syncLimitInfo['hard']} users, which is the maximum number of enabled users you can have");
+				$output->writeln("Please consider to buy a enterprise license to have unlimited users in this backend");
+				$this->notifySoftLimit($syncLimitInfo['soft'], $syncLimitInfo['hard'], $backendName);
+			}
+		}
+		// no need to do anything if there is no limit info
+
 		return 0;
 	}
 
@@ -424,5 +486,150 @@ class SyncBackend extends Command {
 				}
 			);
 		}
+	}
+
+	/**
+	 * Show the number of users in the backend grouped by state. This function will
+	 * return the same information as $mapper->getUserCountForBackendGroupByState(...)
+	 * after that information has been written in the output.
+	 * @param OutputInterface $output
+	 * @param AccountMapper $mapper
+	 * @param UserInterface $backend
+	 */
+	private function showSyncStats(OutputInterface $output, AccountMapper $mapper, UserInterface $backend) {
+		$backendClassName = \get_class($backend);
+		$stats = $mapper->getUserCountForBackendGroupByState($backendClassName);
+
+		$stateToString = [
+			Account::STATE_INITIAL => 'Initial State',
+			Account::STATE_ENABLED => 'Enabled',
+			Account::STATE_DISABLED => 'Disabled',
+			Account::STATE_DELETED => 'Deleted',
+			Account::STATE_AUTODISABLED => 'Auto Disabled',
+		];
+
+		$rowData = [];
+		$userNumberInUnknownState = 0;
+		foreach ($stats as $state => $userNumber) {
+			if (isset($stateToString[$state])) {
+				$rowData[] = [$stateToString[$state], $userNumber];
+			} else {
+				$userNumberInUnknownState += $userNumber;
+			}
+		}
+		if ($userNumberInUnknownState > 0) {
+			$rowData[] = ['Unknown State', $userNumberInUnknownState];
+		}
+
+		$output->writeln("Stats for $backendClassName");
+
+		$table = new Table($output);
+		$table->setHeaders(['State', 'User Count']);
+		$table->setRows($rowData);
+		$table->render();
+
+		return $stats;
+	}
+
+	/**
+	 * Send an email to the admin group to notify they're over the soft limit for the backend
+	 * If the anyone of the admin group doesn't have a valid email or doesn't have the email set,
+	 * it will be silently ignored.
+	 * The notification will be resend after 30 days if it's still applicable
+	 * @param int $softLimit
+	 * @param int $hardLimit
+	 * @param string $backendName
+	 */
+	private function notifySoftLimit($softLimit, $hardLimit, $backendName) {
+		$timeGap = 60 * 60 * 24 * 30;  // 30 days
+		$lastSentTimestamp = $this->config->getAppValue('core', "sync_sent_{$backendName}_soft", 0);
+		if ($this->timeFactory->getTime() < (\intval($lastSentTimestamp) + $timeGap)) {
+			return;
+		}
+
+		$adminGroup = $this->groupManager->get('admin');
+		foreach ($adminGroup->getUsers() as $adminUser) {
+			$adminUserEmail = $adminUser->getEMailAddress();
+			$adminUserDisplayname = $adminUser->getDisplayName();
+			if ($adminUserEmail === null || !$this->mailer->validateMailAddress($adminUserEmail)) {
+				$this->logger->debug("Could not sent email to $adminUserDisplayname");
+				continue;
+			}
+
+			$userLanguage = $this->config->getUserValue($adminUser->getUID(), 'core', 'lang', 'en');
+			$l10n = $this->l10nFactory->get('core', $userLanguage);
+
+			$tmpl = new Template('core', 'sync/htmlmail.softlimit', '', false, $userLanguage);
+			$tmpl->assign('displayname', $adminUserDisplayname);
+			$tmpl->assign('hardLimit', $hardLimit);
+			$tmpl->assign('backend', $backendName);
+			$htmlBody = $tmpl->fetchPage();
+
+			$tmpl2 = new Template('core', 'sync/plainmail.softlimit', '', false, $userLanguage);
+			$tmpl2->assign('displayname', $adminUserDisplayname);
+			$tmpl2->assign('hardLimit', $hardLimit);
+			$tmpl2->assign('backend', $backendName);
+			$plainBody = $tmpl2->fetchPage();
+
+			$mail = $this->mailer->createMessage();
+			$mail->setTo([$adminUserEmail]);
+			$mail->setSubject((string) $l10n->t('Soft limit for users reached'));
+			$mail->setHtmlBody($htmlBody);
+			$mail->setPlainBody($plainBody);
+
+			$this->mailer->send($mail);
+		}
+		$this->config->setAppValue('core', "sync_sent_{$backendName}_soft", $this->timeFactory->getTime());
+	}
+
+	/**
+	 * Send an email to the admin group to notify they're over the hard limit for the backend
+	 * If the anyone of the admin group doesn't have a valid email or doesn't have the email set,
+	 * it will be silently ignored.
+	 * The notification will be resend after 3 days if it's still applicable
+	 * @param int $softLimit
+	 * @param int $hardLimit
+	 * @param string $backendName
+	 */
+	private function notifyHardLimit($softLimit, $hardLimit, $backendName) {
+		$timeGap = 60 * 60 * 24 * 3;  // 3 days
+		$lastSentTimestamp = $this->config->getAppValue('core', "sync_sent_{$backendName}_hard", 0);
+		if ($this->timeFactory->getTime() < (\intval($lastSentTimestamp) + $timeGap)) {
+			return;
+		}
+
+		$adminGroup = $this->groupManager->get('admin');
+		foreach ($adminGroup->getUsers() as $adminUser) {
+			$adminUserEmail = $adminUser->getEMailAddress();
+			$adminUserDisplayname = $adminUser->getDisplayName();
+			if ($adminUserEmail === null || !$this->mailer->validateMailAddress($adminUserEmail)) {
+				$this->logger->debug("Could not sent email to $adminUserDisplayname");
+				continue;
+			}
+
+			$userLanguage = $this->config->getUserValue($adminUser->getUID(), 'core', 'lang', 'en');
+			$l10n = $this->l10nFactory->get('core', $userLanguage);
+
+			$tmpl = new Template('core', 'sync/htmlmail.hardlimit', '', false, $userLanguage);
+			$tmpl->assign('displayname', $adminUserDisplayname);
+			$tmpl->assign('hardLimit', $hardLimit);
+			$tmpl->assign('backend', $backendName);
+			$htmlBody = $tmpl->fetchPage();
+
+			$tmpl2 = new Template('core', 'sync/plainmail.hardlimit', '', false, $userLanguage);
+			$tmpl2->assign('displayname', $adminUserDisplayname);
+			$tmpl2->assign('hardLimit', $hardLimit);
+			$tmpl2->assign('backend', $backendName);
+			$plainBody = $tmpl2->fetchPage();
+
+			$mail = $this->mailer->createMessage();
+			$mail->setTo([$adminUserEmail]);
+			$mail->setSubject((string) $l10n->t('Hard limit for users reached'));
+			$mail->setHtmlBody($htmlBody);
+			$mail->setPlainBody($plainBody);
+
+			$this->mailer->send($mail);
+		}
+		$this->config->setAppValue('core', "sync_sent_{$backendName}_hard", $this->timeFactory->getTime());
 	}
 }

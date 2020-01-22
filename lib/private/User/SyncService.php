@@ -51,6 +51,8 @@ class SyncService {
 	private $logger;
 	/** @var AccountMapper */
 	private $mapper;
+	/** @var SyncLimiter */
+	private $syncLimiter;
 
 	/**
 	 * SyncService constructor.
@@ -59,12 +61,16 @@ class SyncService {
 	 * @param ILogger $logger
 	 * @param AccountMapper $mapper
 	 */
-	public function __construct(IConfig $config,
-								ILogger $logger,
-								AccountMapper $mapper) {
+	public function __construct(
+		IConfig $config,
+		ILogger $logger,
+		AccountMapper $mapper,
+		SyncLimiter $syncLimiter
+	) {
 		$this->config = $config;
 		$this->logger = $logger;
 		$this->mapper = $mapper;
+		$this->syncLimiter = $syncLimiter;
 	}
 
 	/**
@@ -126,7 +132,7 @@ class SyncService {
 		// update existing and insert new users
 		foreach ($userIds as $uid) {
 			try {
-				$account = $this->createOrSyncAccount($uid, $backend);
+				$account = $this->internalCreateOrSyncAccount($uid, $backend);
 				$uid = $account->getUserId(); // get correct case
 				// clean the user's preferences
 				$this->cleanPreferences($uid);
@@ -142,6 +148,7 @@ class SyncService {
 				$callback($uid);
 			}
 		}
+		$this->syncLimiter->limitEnabledUsers();
 	}
 
 	/**
@@ -361,6 +368,12 @@ class SyncService {
 	 * that doesnt match an existing account
 	 */
 	public function createOrSyncAccount($uid, UserInterface $backend) {
+		$account = $this->internalCreateOrSyncAccount($uid, $backend);
+		$this->syncLimiter->limitEnabledUsers();
+		return $account;
+	}
+
+	private function internalCreateOrSyncAccount($uid, UserInterface $backend) {
 		// Try to find the account based on the uid
 		try {
 			$account = $this->mapper->getByUid($uid);
@@ -403,6 +416,113 @@ class SyncService {
 		$a->setState(Account::STATE_ENABLED);
 		$a->setBackend($backend);
 		return $a;
+	}
+
+	/**
+	 * Check if any additional to-be-enabled user in the specified backend will be disabled
+	 * in the next sync run according to the limits set by the SyncLimiter.
+	 * @param string $backend the backend to check
+	 * @return bool true if the user will be disabled, false otherwise
+	 */
+	public function userWillBeDisabledInBackend($backend) {
+		$limitInfo = $this->syncLimiter->getLimitInfo();
+		if (!isset($limitInfo[$backend])) {
+			// no limit info found for the backend -> user can be enabled
+			return false;
+		}
+
+		if ($limitInfo[$backend] === false) {
+			// limit disabled for that backend
+			return false;
+		}
+
+		$backendStateStats = $this->mapper->getUserCountForBackendGroupByState($backend);
+		$numberOfEnabledUsers = 0;
+		if (isset($backendStateStats[Account::STATE_ENABLED])) {
+			$numberOfEnabledUsers = $backendStateStats[Account::STATE_ENABLED];
+		}
+
+		if ($numberOfEnabledUsers >= $limitInfo[$backend]['hard']) {
+			return true;
+		} else {
+			return false;
+		}
+	}
+
+	/**
+	 * Get the user limitation being applied by the SyncService for the specified backend
+	 * If there is no limit being applied, this function will return false, otherwise it will
+	 * return an array with "soft" and "hard" keys meaning the soft and hard limits for
+	 * the number of enabled users in the backend.
+	 * ['soft' => X, 'hard' => Y]
+	 * @param string $backend the backend name to check the limits
+	 * @return array|false an array with the limit information for the backend or false if no
+	 * limit is set.
+	 */
+	public function getUserLimitInfo($backend) {
+		$limitInfo = $this->syncLimiter->getLimitInfo();
+		if (isset($limitInfo[$backend])) {
+			return $limitInfo[$backend];
+		} else {
+			return false;
+		}
+	}
+
+	/**
+	 * Get stat info about the limits being applied by this SyncService. The information returned
+	 * will contain per backend: the limits being applied for the backend and the and the number of
+	 * users which are in a specific state.
+	 * The function will return something like:
+	 * [
+	 *   'myBackend' => [
+	 *     'limits' => $limits,
+	 *     'usersStatsCode' => $stats,
+	 *     'usersStats' => $statsTranslated
+	 *   ]
+	 * ]
+	 * The limits will contain an array with soft and hard limits of the backend, or false if the
+	 * limits are disabled
+	 * Both the usersStatsCode and usersStats will contain mainly the same information. The main
+	 * difference is that the keys usersStatsCode will be the Account::STATE_* constants (numeric)
+	 * while the usersStats will be the "translated" name of those constants (string). Another difference
+	 * is that a new "Unknown State" key might appear in the usersStats grouping non-translated states
+	 * @return array with the information explained above
+	 */
+	public function getLimitInfoStats() {
+		$stateToString = [
+			Account::STATE_INITIAL => 'Initial State',
+			Account::STATE_ENABLED => 'Enabled',
+			Account::STATE_DISABLED => 'Disabled',
+			Account::STATE_DELETED => 'Deleted',
+			Account::STATE_AUTODISABLED => 'Auto Disabled',
+		];
+
+		$stats = [];
+		$limitInfo = $this->syncLimiter->getLimitInfo();
+		foreach ($limitInfo as $backend => $limits) {
+			$backendStateStats = $this->mapper->getUserCountForBackendGroupByState($backend);
+			$backendStateStatsTranslated = [];
+			$userNumberInUnknownState = 0;
+			foreach ($backendStateStats as $backendStateCode => $userCount) {
+				if (isset($stateToString[$backendStateCode])) {
+					$stateName = $stateToString[$backendStateCode];
+					$backendStateStatsTranslated[$stateName] = $userCount;
+				} else {
+					$userNumberInUnknownState += $userCount;
+				}
+			}
+
+			if ($userNumberInUnknownState > 0) {
+				$backendStateStatsTranslated['Unknown State'] = $userNumberInUnknownState;
+			}
+			
+			$stats[$backend] = [
+				'limits' => $limits,
+				'usersStatsCode' => $backendStateStats,
+				'usersStats' => $backendStateStatsTranslated,
+			];
+		}
+		return $stats;
 	}
 
 	/**

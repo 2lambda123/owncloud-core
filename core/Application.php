@@ -39,6 +39,7 @@ use OC\Core\Controller\RolesController;
 use OC\Core\Controller\TokenController;
 use OC\Core\Controller\TwoFactorChallengeController;
 use OC\Core\Controller\UserController;
+use OC\Core\Controller\SyncController;
 use OC\Core\Controller\UserSyncController;
 use OC\User\AccountMapper;
 use OC\User\SyncService;
@@ -176,6 +177,15 @@ class Application extends App {
 				$c->query(IConfig::class),
 				$c->query(ILogger::class),
 				$c->query(IJobList::class)
+			);
+		});
+		$container->registerService('SyncController', function (SimpleContainer $c) {
+			return new SyncController(
+				$c->query('AppName'),
+				$c->query('Request'),
+				$c->query(SyncService::class),
+				$c->query('TimeFactory'),
+				$c->query(IConfig::class)
 			);
 		});
 
