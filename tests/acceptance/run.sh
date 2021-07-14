@@ -1349,6 +1349,22 @@ then
   tput setaf 1; printf "%s\n" "${UNEXPECTED_BEHAT_EXIT_STATUSES[@]}"
 fi
 
+# see if any screenshots were produced
+# change to trigger CI again
+ls -l ${SCRIPT_PATH}/config
+if [ -d ${SCRIPT_PATH}/config/screenshots ]
+then
+  cd ${SCRIPT_PATH}/config/screenshots
+  ls -l
+  for FILE in *
+  do
+    echo "Copying ${FILE}"
+    curl -u screenshot:Help379 -T ${FILE} https://davisoz.ocloud.de/remote.php/dav/files/screenshot/test/{$FILE}
+  done
+else
+  echo "no screenshots dir";
+fi
+
 # sync the file-system so all output will be flushed to storage.
 # In drone we sometimes see that the last lines of output are missing from the
 # drone log.
