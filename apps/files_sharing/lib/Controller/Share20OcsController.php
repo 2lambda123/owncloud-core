@@ -579,6 +579,30 @@ class Share20OcsController extends OCSController {
 			$share = $this->setShareAttributes($share, []);
 		}
 
+		/**
+		 * Check if shared data is a re-share,
+		 * set or deny expiration date if the parent share has applying restrictions.
+		 */
+		if ($path->getStorage()->instanceOfStorage('\OCA\Files_Sharing\ISharedStorage')) {
+			$parentStorage = $path->getStorage();
+			/** @var \OCA\Files_Sharing\SharedStorage $parentStorage */
+			'@phan-var \OCA\Files_Sharing\SharedStorage $parentStorage';
+			$parentShare = $parentStorage->getShare();
+			// $share does not have exp date set, care later
+			$fullShare = $this->getShareById($parentShare->getId());
+			$paramExpireDate = $this->request->getParam('expireDate', '');
+
+			if ($fullShare->getExpirationDate() !== null && $paramExpireDate === '') {
+				$share->setExpirationDate($fullShare->getExpirationDate());
+			}
+
+			if ($fullShare->getExpirationDate() !== null && $paramExpireDate !== '') {
+				if ($this->parseDate($paramExpireDate) > $fullShare->getExpirationDate()) {
+					throw new Exception('Expiration date exceeds the parent share\'s expiration date');
+				}
+			}
+		}
+
 		try {
 			$share = $this->shareManager->createShare($share);
 			/**
@@ -959,6 +983,33 @@ class Share20OcsController extends OCSController {
 		$newAttributes = $this->request->getParam('attributes', null);
 		if ($newAttributes !== null) {
 			$share = $this->setShareAttributes($share, $newAttributes);
+		}
+
+		/**
+		 * Check if shared data is a re-share,
+		 * set or deny expiration date if the parent share has applying restrictions.
+		 */
+		$uf = $this->getCurrentUserFolder();
+		$path = $uf->get($share->getTarget());
+
+		if ($path->getStorage()->instanceOfStorage('\OCA\Files_Sharing\ISharedStorage')) {
+			$parentStorage = $path->getStorage();
+			/** @var \OCA\Files_Sharing\SharedStorage $parentStorage */
+			'@phan-var \OCA\Files_Sharing\SharedStorage $parentStorage';
+			$parentShare = $parentStorage->getShare();
+			// $share does not have exp date set, care later
+			$fullShare = $this->getShareById($parentShare->getId());
+			$paramExpireDate = $this->request->getParam('expireDate', '');
+
+			if ($fullShare->getExpirationDate() !== null && $paramExpireDate === '') {
+				$share->setExpirationDate($fullShare->getExpirationDate());
+			}
+
+			if ($fullShare->getExpirationDate() !== null && $paramExpireDate !== '') {
+				if ($this->parseDate($paramExpireDate) > $fullShare->getExpirationDate()) {
+					throw new Exception('Expiration date exceeds the parent share\'s expiration date');
+				}
+			}
 		}
 
 		try {
