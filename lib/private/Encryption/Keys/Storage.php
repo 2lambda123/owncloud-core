@@ -28,6 +28,7 @@ use OC\Encryption\Util;
 use OC\Files\Filesystem;
 use OC\Files\View;
 use OCP\Encryption\Keys\IStorage;
+use OCP\Files\Mount\IMountManager;
 use OCP\IUserSession;
 use OC\User\NoUserException;
 
@@ -58,13 +59,17 @@ class Storage implements IStorage {
 
 	/** @var string */
 	private $currentUser = null;
+	/**
+	 * @var IMountManager
+	 */
+	private $mountManager;
 
 	/**
 	 * @param View $view view
 	 * @param Util $util encryption util class
 	 * @param IUserSession $session user session
 	 */
-	public function __construct(View $view, Util $util, IUserSession $session) {
+	public function __construct(View $view, Util $util, IUserSession $session, IMountManager $mountManager) {
 		$this->view = $view;
 		$this->util = $util;
 
@@ -75,6 +80,7 @@ class Storage implements IStorage {
 		if ($session !== null && $session->getUser() !== null) {
 			$this->currentUser = $session->getUser()->getUID();
 		}
+		$this->mountManager = $mountManager;
 	}
 
 	/**
@@ -90,6 +96,17 @@ class Storage implements IStorage {
 	 */
 	public function getFileKey($path, $keyId, $encryptionModuleId) {
 		$realFile = $this->util->stripPartialFileExtension($path);
+		$mount = $this->mountManager->find($realFile);
+		if ($mount) {
+			$result = $mount->getStorage()->getFileKey($mount->getInternalPath($realFile), $keyId, $encryptionModuleId);
+			if ($result !== null) {
+				if ($result === '' && $realFile !== $path) {
+					return $mount->getStorage()->getFileKey($mount->getInternalPath($path), $keyId, $encryptionModuleId);
+				}
+				return $result;
+			}
+		}
+
 		$keyDir = $this->getFileKeyDir($encryptionModuleId, $realFile);
 		$key = $this->getKey($keyDir . $keyId);
 
@@ -124,6 +141,14 @@ class Storage implements IStorage {
 	 * @inheritdoc
 	 */
 	public function setFileKey($path, $keyId, $key, $encryptionModuleId) {
+		$mount = $this->mountManager->find($path);
+		if ($mount) {
+			$result = $mount->getStorage()->setFileKey($mount->getInternalPath($path), $keyId, $key, $encryptionModuleId);
+			if ($result !== null) {
+				return $result;
+			}
+		}
+
 		$keyDir = $this->getFileKeyDir($encryptionModuleId, $path);
 		return $this->setKey($keyDir . $keyId, $key);
 	}
@@ -170,6 +195,12 @@ class Storage implements IStorage {
 	 * @inheritdoc
 	 */
 	public function deleteAllFileKeys($path) {
+		$mount = $this->mountManager->find($path);
+		$keyPath = $mount ? $mount->getStorage()->getEncryptionFileKeyDirectory('', $mount->getInternalPath($path)) : null;
+		if ($keyPath) {
+			return false;
+		}
+
 		$keyDir = $this->getFileKeyDir('', $path);
 		return !$this->view->file_exists($keyDir) || $this->view->deleteAll($keyDir);
 	}
@@ -274,6 +305,13 @@ class Storage implements IStorage {
 	 * @return string
 	 */
 	private function getFileKeyDir($encryptionModuleId, $path) {
+		# ask the storage implementation for the key storage
+		$mount = $this->mountManager->find($path);
+		$keyPath = $mount ? $mount->getStorage()->getEncryptionFileKeyDirectory($encryptionModuleId, $mount->getInternalPath($path)) : null;
+		if ($keyPath) {
+			return $keyPath;
+		}
+
 		list($owner, $filename) = $this->util->getUidAndFilename($path);
 
 		// in case of system wide mount points the keys are stored directly in the data directory
@@ -300,7 +338,9 @@ class Storage implements IStorage {
 
 		if ($this->view->file_exists($sourcePath)) {
 			$this->keySetPreparation(\dirname($targetPath));
-			$this->view->rename($sourcePath, $targetPath);
+			if ($sourcePath !== $targetPath) {
+				$this->view->rename($sourcePath, $targetPath);
+			}
 
 			return true;
 		}
@@ -335,6 +375,13 @@ class Storage implements IStorage {
 	 * @return string
 	 */
 	protected function getPathToKeys($path) {
+		# ask the storage implementation for the key storage
+		$mount = $this->mountManager->find($path);
+		$keyPath = $mount ? $mount->getStorage()->getEncryptionFileKeyDirectory('', $mount->getInternalPath($path)) : null;
+		if ($keyPath) {
+			return $keyPath;
+		}
+
 		list($owner, $relativePath) = $this->util->getUidAndFilename($path);
 		$systemWideMountPoint = $this->util->isSystemWideMountPoint($relativePath, $owner);
 

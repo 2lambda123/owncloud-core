@@ -797,4 +797,16 @@ abstract class Common implements Storage, ILockingStorage, IVersionedStorage, IP
 			return $lock;
 		}, $locks);
 	}
+
+	public function getEncryptionFileKeyDirectory(string $encryptionModuleId, string $path): ?string {
+		return null;
+	}
+
+	public function getFileKey(string $internalPath, string $keyId, string $encryptionModuleId): ?string {
+		return null;
+	}
+
+	public function setFileKey(string $internalPath, string $keyId, $key, string $encryptionModuleId): ?bool {
+		return null;
+	}
 }
