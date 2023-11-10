@@ -64,7 +64,8 @@ class MetaStorage {
 	/** @var FileHelper  */
 	private $fileHelper;
 
-	private ?bool $objectStoreEnabled = null;
+	/** @var boolean|null */
+	private $objectStoreEnabled = null;
 
 	/**
 	 * @param string $dataDir Absolute path to the data-directory
@@ -210,7 +211,7 @@ class MetaStorage {
 		// increment version tag for current meta
 		$oldCurrentVersionTag = $currentMetaData['version_tag'] ?? '';
 		$newCurrentVersionTag = $this->incrementVersionTag($oldCurrentVersionTag, true);
-			
+
 		// create new currentMetaFile
 		$metadata = [
 			'edited_by' => $newVersionEditedBy,
@@ -299,7 +300,7 @@ class MetaStorage {
 			// initialize
 			return '0.1';
 		}
-		
+
 		$versionParts = explode(".", $oldVersionTag);
 		$majorVersionPart = $versionParts[0];
 		$minorVersionPart = $versionParts[1];
