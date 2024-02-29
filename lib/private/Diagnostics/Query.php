@@ -29,16 +29,11 @@ class Query implements IQuery, \JsonSerializable {
 
 	private array $params;
 
-	private int $start;
+	private float $start;
 
-	private int $end;
+	private float $end;
 
-	/**
-	 * @param string $sql
-	 * @param array $params
-	 * @param int $start
-	 */
-	public function __construct(string $sql, $params, $start) {
+	public function __construct(string $sql, array $params, float $start) {
 		$this->sql = $sql;
 		$this->params = $params;
 		$this->start = $start;
@@ -76,7 +71,7 @@ class Query implements IQuery, \JsonSerializable {
 		return $this->end - $this->start;
 	}
 
-	public function jsonSerialize() {
+	public function jsonSerialize(): mixed {
 		return [
 			'query' => $this->sql,
 			'parameters' => $this->params,
